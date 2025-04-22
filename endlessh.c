@@ -40,6 +40,7 @@
 #endif
 
 #define DEFAULT_BIND_FAMILY  AF_UNSPEC
+#define DEFAULT_LISTEN_FD   -1 /*-1 for unspecified, other value for passed fd*/
 
 #define XSTR(s) STR(s)
 #define STR(s) #s
@@ -301,6 +302,7 @@ struct config {
     int max_line_length;
     int max_clients;
     int bind_family;
+    int listen_fd;
 };
 
 #define CONFIG_DEFAULT { \
@@ -309,6 +311,7 @@ struct config {
     .max_line_length = DEFAULT_MAX_LINE_LENGTH, \
     .max_clients     = DEFAULT_MAX_CLIENTS, \
     .bind_family     = DEFAULT_BIND_FAMILY, \
+    .listen_fd       = DEFAULT_LISTEN_FD, \
 }
 
 static void
@@ -392,6 +395,21 @@ config_set_bind_family(struct config *c, const char *s, int hardfail)
   }
 }
 
+static void
+config_set_listen_fd(struct config *c, const char *s, int hardfail)
+{
+    errno = 0;
+    char *end;
+    long tmp = strtol(s, &end, 10);
+    if (errno || *end || tmp < 1 || tmp > INT_MAX) {
+        fprintf(stderr, "endlessh: Invalid listen fd: %s\n", s);
+        if (hardfail)
+            exit(EXIT_FAILURE);
+    } else {
+        c->listen_fd = tmp;
+    }
+}
+
 enum config_key {
     KEY_INVALID,
     KEY_PORT,
@@ -400,6 +418,7 @@ enum config_key {
     KEY_MAX_CLIENTS,
     KEY_LOG_LEVEL,
     KEY_BIND_FAMILY,
+    KEY_LISTEN_FD,
 };
 
 static enum config_key
@@ -411,7 +430,8 @@ config_key_parse(const char *tok)
         [KEY_MAX_LINE_LENGTH] = "MaxLineLength",
         [KEY_MAX_CLIENTS]     = "MaxClients",
         [KEY_LOG_LEVEL]       = "LogLevel",
-        [KEY_BIND_FAMILY]     = "BindFamily"
+        [KEY_BIND_FAMILY]     = "BindFamily",
+        [KEY_LISTEN_FD]       = "ListenFD"
     };
     for (size_t i = 1; i < sizeof(table) / sizeof(*table); i++)
         if (!strcmp(tok, table[i]))
@@ -481,6 +501,9 @@ config_load(struct config *c, const char *file, int hardfail)
                 case KEY_BIND_FAMILY:
                     config_set_bind_family(c, tokens[1], hardfail);
                     break;
+                case KEY_LISTEN_FD:
+                    config_set_listen_fd(c, tokens[1], hardfail);
+                    break;
                 case KEY_LOG_LEVEL: {
                     errno = 0;
                     char *end;
@@ -511,6 +534,7 @@ config_log(const struct config *c)
         c->bind_family == AF_INET6 ? "IPv6 Only" :
         c->bind_family == AF_INET  ? "IPv4 Only" :
                                 "IPv4 Mapped IPv6");
+    logmsg(log_info, "ListenFD %d", c->listen_fd);
 }
 
 static void
@@ -530,6 +554,7 @@ usage(FILE *f)
     fprintf(f, "  -m INT    Maximum number of clients ["
             XSTR(DEFAULT_MAX_CLIENTS) "]\n");
     fprintf(f, "  -p INT    Listening port [" XSTR(DEFAULT_PORT) "]\n");
+    fprintf(f, "  -L INT    Listening file descriptor [" XSTR(DEFAULT_LISTEN_FD) "]\n");
     fprintf(f, "  -v        Print diagnostics to standard output "
             "(repeatable)\n");
     fprintf(f, "  -V        Print version information and exit\n");
@@ -638,10 +663,14 @@ main(int argc, char **argv)
         die();
 #endif
 
+    if (config.listen_fd != -1) {
+        printf("Using LISTEN_FD=%d from environment\n", config.listen_fd);
+    }
+
     config_load(&config, config_file, 1);
 
     int option;
-    while ((option = getopt(argc, argv, "46d:f:hl:m:p:svV")) != -1) {
+    while ((option = getopt(argc, argv, "46d:f:hl:m:p:L:svV")) != -1) {
         switch (option) {
             case '4':
                 config_set_bind_family(&config, "4", 1);
@@ -675,6 +704,9 @@ main(int argc, char **argv)
                 break;
             case 'p':
                 config_set_port(&config, optarg, 1);
+                break;
+            case 'L':
+                config_set_listen_fd(&config, optarg, 1);
                 break;
             case 's':
                 logmsg = logsyslog;
@@ -737,16 +769,20 @@ main(int argc, char **argv)
 
     unsigned long rng = epochms();
 
-    int server = server_create(config.port, config.bind_family);
+    int server = config.listen_fd != -1
+                     ? config.listen_fd
+                     : server_create(config.port, config.bind_family);
 
     while (running) {
         if (reload) {
             /* Configuration reload requested (SIGHUP) */
             int oldport = config.port;
             int oldfamily = config.bind_family;
+            int oldfd = config.listen_fd;
             config_load(&config, config_file, 0);
             config_log(&config);
-            if (oldport != config.port || oldfamily != config.bind_family) {
+            if ((oldport != config.port || oldfamily != config.bind_family) &&
+                config.listen_fd == -1 && oldfd == -1) {
                 close(server);
                 server = server_create(config.port, config.bind_family);
             }
