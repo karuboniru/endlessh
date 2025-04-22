@@ -40,7 +40,7 @@
 #endif
 
 #define DEFAULT_BIND_FAMILY  AF_UNSPEC
-#define DEFAULT_LISTEN_FD   -1 /*-1 for unspecified, other value for passed fd*/
+#define DEFAULT_LISTEN_FD_COUNT   0 /*-1 for unspecified, other value for passed fd*/
 
 #define XSTR(s) STR(s)
 #define STR(s) #s
@@ -302,7 +302,7 @@ struct config {
     int max_line_length;
     int max_clients;
     int bind_family;
-    int listen_fd;
+    int listen_fd_count;
 };
 
 #define CONFIG_DEFAULT { \
@@ -311,7 +311,7 @@ struct config {
     .max_line_length = DEFAULT_MAX_LINE_LENGTH, \
     .max_clients     = DEFAULT_MAX_CLIENTS, \
     .bind_family     = DEFAULT_BIND_FAMILY, \
-    .listen_fd       = DEFAULT_LISTEN_FD, \
+    .listen_fd_count = DEFAULT_LISTEN_FD_COUNT, \
 }
 
 static void
@@ -396,7 +396,7 @@ config_set_bind_family(struct config *c, const char *s, int hardfail)
 }
 
 static void
-config_set_listen_fd(struct config *c, const char *s, int hardfail)
+config_set_listen_fd_count(struct config *c, const char *s, int hardfail)
 {
     errno = 0;
     char *end;
@@ -406,7 +406,7 @@ config_set_listen_fd(struct config *c, const char *s, int hardfail)
         if (hardfail)
             exit(EXIT_FAILURE);
     } else {
-        c->listen_fd = tmp;
+        c->listen_fd_count = tmp;
     }
 }
 
@@ -502,7 +502,7 @@ config_load(struct config *c, const char *file, int hardfail)
                     config_set_bind_family(c, tokens[1], hardfail);
                     break;
                 case KEY_LISTEN_FD:
-                    config_set_listen_fd(c, tokens[1], hardfail);
+                    config_set_listen_fd_count(c, tokens[1], hardfail);
                     break;
                 case KEY_LOG_LEVEL: {
                     errno = 0;
@@ -534,7 +534,7 @@ config_log(const struct config *c)
         c->bind_family == AF_INET6 ? "IPv6 Only" :
         c->bind_family == AF_INET  ? "IPv4 Only" :
                                 "IPv4 Mapped IPv6");
-    logmsg(log_info, "ListenFD %d", c->listen_fd);
+    logmsg(log_info, "ListenFD %d", c->listen_fd_count);
 }
 
 static void
@@ -554,7 +554,7 @@ usage(FILE *f)
     fprintf(f, "  -m INT    Maximum number of clients ["
             XSTR(DEFAULT_MAX_CLIENTS) "]\n");
     fprintf(f, "  -p INT    Listening port [" XSTR(DEFAULT_PORT) "]\n");
-    fprintf(f, "  -L INT    Listening file descriptor [" XSTR(DEFAULT_LISTEN_FD) "]\n");
+    fprintf(f, "  -L INT    Listening file descriptor [" XSTR(DEFAULT_LISTEN_FD_COUNT) "]\n");
     fprintf(f, "  -v        Print diagnostics to standard output "
             "(repeatable)\n");
     fprintf(f, "  -V        Print version information and exit\n");
@@ -649,6 +649,23 @@ sendline(struct client *client, int max_line_length, unsigned long *rng)
     }
 }
 
+static int 
+get_listen_fd_count(void)
+{
+    const char *env = getenv("LISTEN_FDS");
+    if (env) {
+        errno = 0;
+        char *end;
+        long tmp = strtol(env, &end, 10);
+        if (errno || *end || tmp < 1 || tmp > INT_MAX) {
+            fprintf(stderr, "endlessh: Invalid LISTEN_FD: %s\n", env);
+            exit(EXIT_FAILURE);
+        }
+        return tmp;
+    }
+    return -1;
+}
+
 
 int
 main(int argc, char **argv)
@@ -663,9 +680,7 @@ main(int argc, char **argv)
         die();
 #endif
 
-    if (config.listen_fd != -1) {
-        printf("Using LISTEN_FD=%d from environment\n", config.listen_fd);
-    }
+    config.listen_fd_count = get_listen_fd_count();
 
     config_load(&config, config_file, 1);
 
@@ -706,7 +721,7 @@ main(int argc, char **argv)
                 config_set_port(&config, optarg, 1);
                 break;
             case 'L':
-                config_set_listen_fd(&config, optarg, 1);
+                config_set_listen_fd_count(&config, optarg, 1);
                 break;
             case 's':
                 logmsg = logsyslog;
@@ -769,8 +784,8 @@ main(int argc, char **argv)
 
     unsigned long rng = epochms();
 
-    int server = config.listen_fd != -1
-                     ? config.listen_fd
+    int server = config.listen_fd_count != 0
+                     ? 3 /* 3 is the start of passed fd*/
                      : server_create(config.port, config.bind_family);
 
     while (running) {
@@ -778,11 +793,11 @@ main(int argc, char **argv)
             /* Configuration reload requested (SIGHUP) */
             int oldport = config.port;
             int oldfamily = config.bind_family;
-            int oldfd = config.listen_fd;
+            int oldfd = config.listen_fd_count;
             config_load(&config, config_file, 0);
             config_log(&config);
             if ((oldport != config.port || oldfamily != config.bind_family) &&
-                config.listen_fd == -1 && oldfd == -1) {
+                config.listen_fd_count == -1 && oldfd == -1) {
                 close(server);
                 server = server_create(config.port, config.bind_family);
             }
@@ -811,10 +826,25 @@ main(int argc, char **argv)
         }
 
         /* Wait for next event */
-        struct pollfd fds = {server, POLLIN, 0};
-        int nfds = fifo->length < config.max_clients;
+        int is_full = fifo->length < config.max_clients;
+        int nfds_to_poll = config.listen_fd_count != 0 ? config.listen_fd_count : 1;
+        int nfds = is_full ? nfds_to_poll : 0;
+        struct pollfd * pfds = calloc(nfds_to_poll, sizeof(struct pollfd));
+        if (pfds == NULL) {
+            fprintf(stderr, "endlessh: fatal: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        if (config.listen_fd_count == 0){
+            pfds[0].fd = server;
+            pfds[0].events = POLLIN;
+        } else {
+            for (int i = 0; i < config.listen_fd_count; i++) {
+                pfds[i].fd = i + 3; // 3 is the start of passed fd
+                pfds[i].events = POLLIN;
+            }
+        }
         logmsg(log_debug, "poll(%d, %d)", nfds, timeout);
-        int r = poll(&fds, nfds, timeout);
+        int r = poll(pfds, nfds, timeout);
         logmsg(log_debug, "= %d", r);
         if (r == -1) {
             switch (errno) {
@@ -828,44 +858,46 @@ main(int argc, char **argv)
         }
 
         /* Check for new incoming connections */
-        if (fds.revents & POLLIN) {
-            int fd = accept(server, 0, 0);
-            logmsg(log_debug, "accept() = %d", fd);
-            statistics.connects++;
-            if (fd == -1) {
-                const char *msg = strerror(errno);
-                switch (errno) {
-                    case EMFILE:
-                    case ENFILE:
-                        config.max_clients = fifo->length;
-                        logmsg(log_info,
-                                "MaxClients %d",
-                                fifo->length);
-                        break;
-                    case ECONNABORTED:
-                    case EINTR:
-                    case ENOBUFS:
-                    case ENOMEM:
-                    case EPROTO:
-                        fprintf(stderr, "endlessh: warning: %s\n", msg);
-                        break;
-                    default:
-                        fprintf(stderr, "endlessh: fatal: %s\n", msg);
-                        exit(EXIT_FAILURE);
-                }
-            } else {
-                long long send_next = epochms() + config.delay;
-                struct client *client = client_new(fd, send_next);
-                int flags = fcntl(fd, F_GETFL, 0);      /* cannot fail */
-                fcntl(fd, F_SETFL, flags | O_NONBLOCK); /* cannot fail */
-                if (!client) {
-                    fprintf(stderr, "endlessh: warning: out of memory\n");
-                    close(fd);
+        for (int i = 0; i < nfds; i++) {
+            if (pfds[i].revents & POLLIN) {
+                int fd = accept(pfds[i].fd, 0, 0);
+                logmsg(log_debug, "accept() = %d", fd);
+                statistics.connects++;
+                if (fd == -1) {
+                    const char *msg = strerror(errno);
+                    switch (errno) {
+                        case EMFILE:
+                        case ENFILE:
+                            config.max_clients = fifo->length;
+                            logmsg(log_info,
+                                    "MaxClients %d",
+                                    fifo->length);
+                            break;
+                        case ECONNABORTED:
+                        case EINTR:
+                        case ENOBUFS:
+                        case ENOMEM:
+                        case EPROTO:
+                            fprintf(stderr, "endlessh: warning: %s\n", msg);
+                            break;
+                        default:
+                            fprintf(stderr, "endlessh: fatal: %s\n", msg);
+                            exit(EXIT_FAILURE);
+                    }
                 } else {
-                    fifo_append(fifo, client);
-                    logmsg(log_info, "ACCEPT host=%s port=%d fd=%d n=%d/%d",
-                            client->ipaddr, client->port, client->fd,
-                            fifo->length, config.max_clients);
+                    long long send_next = epochms() + config.delay;
+                    struct client *client = client_new(fd, send_next);
+                    int flags = fcntl(fd, F_GETFL, 0);      /* cannot fail */
+                    fcntl(fd, F_SETFL, flags | O_NONBLOCK); /* cannot fail */
+                    if (!client) {
+                        fprintf(stderr, "endlessh: warning: out of memory\n");
+                        close(fd);
+                    } else {
+                        fifo_append(fifo, client);
+                        logmsg(log_info, "ACCEPT host=%s port=%d fd=%d n=%d/%d",
+                                client->ipaddr, client->port, client->fd,
+                                fifo->length, config.max_clients);
+                    }
                 }
             }
         }
