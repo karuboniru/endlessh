@@ -25,6 +25,7 @@ Usage: endlessh [-vhs] [-d MS] [-f CONFIG] [-l LEN] [-m LIMIT] [-p PORT]
   -l INT    Maximum banner line length (3-255) [32]
   -m INT    Maximum number of clients [4096]
   -p INT    Listening port [2222]
+  -L INT    Listening file descriptor count [0 / $LISTEN_FDS]
   -s        Print diagnostics to syslog instead of standard output
   -v        Print diagnostics (repeatable)
 ```
@@ -79,6 +80,12 @@ LogLevel 0
 #   4 = Use IPv4 only
 #   6 = Use IPv6 only
 BindFamily 0
+
+# The listen fds parameter usually obtained from systemd
+# Setting it here is just for testing
+# left as 0 to use the default
+# And this will always be overridden by $LISTEN_FDS if set
+LISTENFDS 0
 ```
 
 ## Build issues

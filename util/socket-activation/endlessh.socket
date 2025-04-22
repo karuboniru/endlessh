@@ -1,0 +1,5 @@
+[Socket]
+ListenStream=[::]:22
+
+[Install]
+WantedBy=sockets.target

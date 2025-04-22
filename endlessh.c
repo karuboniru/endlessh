@@ -431,7 +431,7 @@ config_key_parse(const char *tok)
         [KEY_MAX_CLIENTS]     = "MaxClients",
         [KEY_LOG_LEVEL]       = "LogLevel",
         [KEY_BIND_FAMILY]     = "BindFamily",
-        [KEY_LISTEN_FD]       = "ListenFD"
+        [KEY_LISTEN_FD]       = "LISTENFDS"
     };
     for (size_t i = 1; i < sizeof(table) / sizeof(*table); i++)
         if (!strcmp(tok, table[i]))
@@ -534,7 +534,7 @@ config_log(const struct config *c)
         c->bind_family == AF_INET6 ? "IPv6 Only" :
         c->bind_family == AF_INET  ? "IPv4 Only" :
                                 "IPv4 Mapped IPv6");
-    logmsg(log_info, "ListenFD %d", c->listen_fd_count);
+    logmsg(log_info, "LISTENFDS %d", c->listen_fd_count);
 }
 
 static void
@@ -554,7 +554,7 @@ usage(FILE *f)
     fprintf(f, "  -m INT    Maximum number of clients ["
             XSTR(DEFAULT_MAX_CLIENTS) "]\n");
     fprintf(f, "  -p INT    Listening port [" XSTR(DEFAULT_PORT) "]\n");
-    fprintf(f, "  -L INT    Listening file descriptor [" XSTR(DEFAULT_LISTEN_FD_COUNT) "]\n");
+    fprintf(f, "  -L INT    Listening file descriptor count [" XSTR(DEFAULT_LISTEN_FD_COUNT) " / $LISTEN_FDS]\n");
     fprintf(f, "  -v        Print diagnostics to standard output "
             "(repeatable)\n");
     fprintf(f, "  -V        Print version information and exit\n");
@@ -663,7 +663,7 @@ get_listen_fd_count(void)
         }
         return tmp;
     }
-    return -1;
+    return 0;
 }
 
 
